@@ -1,40 +1,170 @@
-
 import os
 import time
 import streamlit as st
 
-# --- Google GenAI SDK (Gemini API + Veo 3) ---
+# Google GenAI SDK (Gemini API + Veo 3)
 from google import genai
 from google.genai import types
 
-# Page config
-st.set_page_config(page_title="Veo 3 Video Generator", layout="centered", page_icon="🎬")
-
-st.title("🎬 Veo 3 Video Generator (Gemini API)")
-st.caption("Text-to-Video 8 detik (Veo 3). Siap untuk Streamlit Cloud.")
+# ===== UI & INFO =====
+st.set_page_config(page_title="Veo 3 Video Generator (Batch)", layout="centered", page_icon="🎬")
+st.title("🎬 Veo 3 Video Generator — Batch Mode")
 
 with st.expander("ℹ️ Info singkat"):
     st.markdown(
         """
 - **Veo 3** menghasilkan video **8 detik** dengan audio native.
-- Biaya mengikuti tarif model pada Gemini API. Pastikan punya billing aktif.
 - **Aspect ratio**: 16:9 dan 9:16. (Catatan: 1080p terutama untuk 16:9).
-- Model ID: `veo-3.0-generate-001` (kualitas) dan `veo-3.0-fast-generate-001` (lebih cepat/hemat).
+- **Model**: 
+  - `veo-3.0-generate-001` ➜ kualitas tinggi  
+  - `veo-3.0-fast-generate-001` ➜ lebih cepat/hemat
+- *Tip:* Untuk **9:16**, gunakan **720p** agar tidak fallback ke 16:9.
         """
     )
 
-# --- API Key lookup precedence: st.secrets -> env var -> input box ---
+# ==== API KEY ====
 API_KEY = None
 try:
-    # Streamlit Cloud secrets
+    # Prioritas: Secrets di Streamlit Cloud
     API_KEY = st.secrets.get("GEMINI_API_KEY", None) or st.secrets.get("GOOGLE_API_KEY", None)
 except Exception:
     API_KEY = None
 
 API_KEY = API_KEY or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-api_key_input = st.text_input(
-    "API Key (opsional jika tidak pakai Secrets/Environment)", 
-    type="password", 
+
+with st.sidebar:
+    st.header("Settings")
+    # izinkan user isi API key di WEB jika belum ada
+    api_key_input = st.text_input("API Key (opsional jika pakai Secrets/ENV)", type="password",
+                                  help="Kalau kosong, app akan pakai Secrets/ENV.")
+    if api_key_input:
+        API_KEY = api_key_input
+
+    model = st.selectbox("Model", ["veo-3.0-generate-001", "veo-3.0-fast-generate-001"], index=1)
+    aspect = st.selectbox("Aspect Ratio", ["16:9", "9:16"], index=1)
+    resolution = st.selectbox("Resolution", ["720p", "1080p"], index=0, help="1080p stabil untuk 16:9. 9:16 → 720p.")
+    seed = st.number_input("Seed (opsional, integer)", min_value=0, step=1, value=0)
+    negative_prompt = st.text_input("Negative prompt (opsional)", value="")
+    max_batch = st.number_input("Batas batch (untuk jaga-jaga)", min_value=1, max_value=20, value=10)
+
+if not API_KEY:
+    st.warning("Isi **API Key** di sidebar, atau set di Secrets/ENV.")
+    st.stop()
+
+# Init client
+try:
+    client = genai.Client(api_key=API_KEY)
+except Exception as e:
+    st.error(f"Gagal inisialisasi client: {e}")
+    st.stop()
+
+# Guard untuk 9:16
+if aspect == "9:16" and resolution == "1080p":
+    st.info("Untuk **9:16**, 1080p belum stabil. App akan otomatis menggunakan **720p**.")
+    resolution = "720p"
+
+# ===== PROMPT MULTI-LINE =====
+st.subheader("Prompt video (satu baris = satu video)")
+prompts_text = st.text_area(
+    "Contoh:\n"
+    "Kucing oranye berlari di bawah jamur raksasa, hujan gerimis, dialog: \"Aku bisa!\"\n"
+    "Produk minuman kaleng, splash slow-motion di studio putih\n"
+    "Anime action di rooftop malam, neon city, camera shake",
+    height=180,
+)
+
+def collect_prompts(raw: str):
+    lines = [ln.strip() for ln in (raw or "").split("\n")]
+    lines = [ln for ln in lines if ln]  # buang kosong
+    return lines[: max_batch]
+
+prompts = collect_prompts(prompts_text)
+
+col1, col2 = st.columns(2)
+with col1:
+    run = st.button(f"🚀 Generate {len(prompts) if prompts else ''} Video", type="primary")
+with col2:
+    if st.button("🗑️ Reset"):
+        st.experimental_rerun()
+
+if not run:
+    st.stop()
+
+if not prompts:
+    st.error("Isi minimal **1 baris prompt**.")
+    st.stop()
+
+# ===== Eksekusi Batch =====
+results = []  # simpan (prompt, filename, error)
+overall = st.progress(0)
+status = st.empty()
+
+for idx, p in enumerate(prompts, start=1):
+    status.write(f"#{idx}/{len(prompts)} Mengirim job…")
+    try:
+        cfg = types.GenerateVideosConfig(
+            aspect_ratio=aspect,
+            resolution=resolution,
+            negative_prompt=negative_prompt or None,
+            seed=seed or None,
+        )
+        op = client.models.generate_videos(
+            model=model,
+            prompt=p,
+            config=cfg
+        )
+    except Exception as e:
+        results.append((p, None, f"Gagal memulai generate: {e}"))
+        overall.progress(int(idx / len(prompts) * 100))
+        continue
+
+    # Polling sampai selesai
+    poll = st.progress(0, text=f"Prompt #{idx}: menunggu hasil…")
+    ticks = 0
+    try:
+        while not op.done:
+            time.sleep(6)
+            ticks += 1
+            op = client.operations.get(op)
+            poll.progress(min(100, ticks * 7), text=f"Prompt #{idx}: processing…")
+
+        poll.progress(100, text=f"Prompt #{idx}: mengunduh video…")
+
+        vids = getattr(op.response, "generated_videos", [])
+        if not vids:
+            results.append((p, None, "Response tidak berisi video."))
+        else:
+            v = vids[0]
+            client.files.download(file=v.video)
+            out_name = f"veo_output_{idx:02d}.mp4"
+            v.video.save(out_name)
+            results.append((p, out_name, None))
+    except Exception as e:
+        results.append((p, None, f"Error saat proses/pengunduhan: {e}"))
+
+    overall.progress(int(idx / len(prompts) * 100))
+
+status.success("Selesai! Lihat hasil di bawah.")
+
+# ===== Tampilkan Hasil =====
+for i, (p, fname, err) in enumerate(results, start=1):
+    with st.expander(f"#{i} Prompt: {p[:80]}{'…' if len(p) > 80 else ''}", expanded=True if err else False):
+        if err:
+            st.error(err)
+            continue
+        st.video(fname)
+        with open(fname, "rb") as f:
+            st.download_button("⬇️ Download MP4", data=f, file_name=fname, mime="video/mp4")
+
+# Ringkasan
+with st.expander("🔎 Debug request (ringkas)"):
+    st.json({
+        "model": model,
+        "aspect_ratio": aspect,
+        "resolution": resolution,
+        "seed": seed or None,
+        "batch_count": len(prompts)
+    })    type="password", 
     help="Set di Streamlit Cloud Secrets (GEMINI_API_KEY) atau ENV. Kamu juga bisa isi langsung di sini untuk uji coba lokal."
 )
 
