@@ -7,7 +7,7 @@ from google.genai import types
 
 st.set_page_config(page_title="Veo Generator (Video & Image)", layout="wide")
 st.title("🎬 Veo Generator — Video & Image")
-st.caption("Text→Video, Image→Video, dan Generate Image (alias “Nano Banana”). 1 baris prompt = 1 output.")
+st.caption("Text→Video, Image→Video (multi gambar), dan Generate Image (alias “Nano Banana”). 1 baris prompt = 1 output.")
 
 # ========== API KEY ==========
 API_KEY = None
@@ -19,7 +19,8 @@ API_KEY = API_KEY or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 with st.sidebar:
     st.header("Settings")
-    api_key_input = st.text_input("API Key (opsional—kalau tak ada di Secrets/ENV)", type="password")
+    api_key_input = st.text_input("API Key (opsional—kalau tak ada di Secrets/ENV)", type="password",
+                                  help="Masukkan API key Gemini/Google AI Studio jika belum diset di Secrets/ENV.")
     if api_key_input:
         API_KEY = api_key_input
 
@@ -61,7 +62,7 @@ def pil_image_from_uploaded(uploaded):
     return raw, mime
 
 # ========== TABS ==========
-tab1, tab2, tab3 = st.tabs(["Text → Video", "Image → Video", "Generate Image (Nano Banana)"])
+tab1, tab2, tab3 = st.tabs(["Text → Video", "Image → Video (multi)", "Generate Image (Nano Banana)"])
 
 # ===================== TAB 1 — TEXT → VIDEO =====================
 with tab1:
@@ -71,11 +72,17 @@ with tab1:
     with col_left:
         video_model_label = st.selectbox("Model Video", list(VIDEO_MODEL_LABELS.keys()), index=1)
         aspect = st.selectbox("Aspect Ratio", ["16:9", "9:16"], index=1)
-        resolution = st.selectbox("Resolution", ["720p", "1080p"], index=0, help="1080p stabil untuk 16:9. 9:16 → 720p.")
-        seed = st.number_input("Seed (opsional)", min_value=0, step=1, value=0)
+        resolution = st.selectbox("Resolution", ["720p", "1080p"], index=0,
+                                  help="1080p stabil untuk 16:9. 9:16 disarankan 720p agar tidak fallback.")
+        seed = st.number_input("Seed (opsional)",
+                               min_value=0, step=1, value=0,
+                               help="Seed = angka acak untuk reproduksibilitas. "
+                                    "Seed sama + prompt sama → hasil mirip/serupa.")
     with col_right:
         negative_prompt = st.text_input("Negative prompt (opsional)", value="")
-        max_batch = st.number_input("Batas batch", min_value=1, max_value=20, value=10)
+        max_batch = st.number_input("Batas batch",
+                                    min_value=1, max_value=50, value=10,
+                                    help="Maksimum jumlah item diproses sekali klik (mencegah overload/limit).")
         st.caption("Tip: Untuk 9:16, gunakan 720p agar tidak fallback ke 16:9.")
 
     if aspect == "9:16" and resolution == "1080p":
@@ -154,59 +161,91 @@ with tab1:
             overall.progress(int(idx / len(prompts) * 100))
             status_global.info(f"Selesai #{idx}/{len(prompts)}")
 
-# ===================== TAB 2 — IMAGE → VIDEO =====================
+# ===================== TAB 2 — IMAGE → VIDEO (MULTI IMAGE) =====================
 with tab2:
-    st.subheader("Image → Video")
+    st.subheader("Image → Video (Multi Image Upload)")
 
     col_left, col_right = st.columns([1, 1])
     with col_left:
         video_model_label_i2v = st.selectbox("Model Video", list(VIDEO_MODEL_LABELS.keys()), index=1, key="i2v_model")
         aspect_i2v = st.selectbox("Aspect Ratio", ["16:9", "9:16"], index=1, key="i2v_ar")
-        resolution_i2v = st.selectbox("Resolution", ["720p", "1080p"], index=0, key="i2v_res")
-        seed_i2v = st.number_input("Seed (opsional)", min_value=0, step=1, value=0, key="i2v_seed")
+        resolution_i2v = st.selectbox("Resolution", ["720p", "1080p"], index=0, key="i2v_res",
+                                      help="1080p stabil untuk 16:9. 9:16 disarankan 720p.")
+        seed_i2v = st.number_input("Seed (opsional)", min_value=0, step=1, value=0, key="i2v_seed",
+                                   help="Seed = angka acak untuk reproduksibilitas hasil dari gambar.")
     with col_right:
         negative_prompt_i2v = st.text_input("Negative prompt (opsional)", value="", key="i2v_neg")
-        max_batch_i2v = st.number_input("Batas batch", min_value=1, max_value=20, value=5, key="i2v_batch")
+        max_batch_i2v = st.number_input("Batas batch", min_value=1, max_value=50, value=10, key="i2v_batch",
+                                        help="Maksimum total item (gambar/prompt) yang diproses dalam satu run.")
 
     if aspect_i2v == "9:16" and resolution_i2v == "1080p":
         st.info("Untuk 9:16, 1080p belum stabil → otomatis 720p.")
         resolution_i2v = "720p"
 
-    uploaded_image = st.file_uploader("Upload gambar (PNG/JPG)", type=["png", "jpg", "jpeg"])
+    uploaded_images = st.file_uploader(
+        "Upload beberapa gambar (PNG/JPG) — bisa pilih banyak sekaligus",
+        type=["png", "jpg", "jpeg"], accept_multiple_files=True
+    )
+
+    st.caption("📝 Prompt pairing:\n"
+               "- Jika **hanya 1 baris prompt**, baris tersebut dipakai untuk **semua gambar**.\n"
+               "- Jika ada **beberapa baris prompt**, baris ke-N akan dipakai untuk **gambar ke-N** (berdasarkan urutan file). "
+               "Kelebihan gambar memakai prompt terakhir.")
+
     prompts_text_i2v = st.text_area(
-        "📝 Prompt (1 baris = 1 video, gambar sama untuk semua baris)",
+        "📝 Prompt (alignment sesuai urutan gambar)",
         height=160,
         placeholder="Contoh:\nOrbit pelan, cinematic rain\nDolly-in, dramatic lighting",
         key="i2v_text",
     )
-    prompts_i2v = collect_prompts(prompts_text_i2v, int(max_batch_i2v))
 
-    run_i2v = st.button(f"🚀 Generate {len(prompts_i2v) if prompts_i2v else 0} Video dari Gambar", type="primary")
+    # batasi jumlah gambar sesuai batch
+    images = uploaded_images or []
+    if images and len(images) > int(max_batch_i2v):
+        st.warning(f"Jumlah gambar melebihi batas batch ({int(max_batch_i2v)}). "
+                   f"Yang diproses hanya {int(max_batch_i2v)} pertama.")
+        images = images[: int(max_batch_i2v)]
+
+    # siapkan prompts
+    raw_prompts_i2v = [ln.strip() for ln in (prompts_text_i2v or "").split("\n") if ln.strip()]
+    if raw_prompts_i2v and len(raw_prompts_i2v) > int(max_batch_i2v):
+        raw_prompts_i2v = raw_prompts_i2v[: int(max_batch_i2v)]
+
+    run_i2v = st.button(
+        f"🚀 Generate Video untuk {len(images) if images else 0} Gambar",
+        type="primary"
+    )
 
     if run_i2v:
-        if uploaded_image is None:
-            st.error("Upload satu gambar dulu.")
-            st.stop()
-        if not prompts_i2v:
-            st.error("Isi minimal 1 baris prompt.")
+        if not images:
+            st.error("Upload minimal 1 gambar.")
             st.stop()
 
-        image_bytes, mime = pil_image_from_uploaded(uploaded_image)
-        if not image_bytes:
-            st.error("Gagal membaca file gambar.")
-            st.stop()
-
-        image_input = types.Image(image_bytes=image_bytes, mime_type=mime)
         model_i2v = VIDEO_MODEL_LABELS[video_model_label_i2v]
         overall_i2v = st.progress(0)
         status_i2v = st.empty()
 
-        for idx, p in enumerate(prompts_i2v, start=1):
+        total = len(images)
+        for idx, img_file in enumerate(images, start=1):
+            # Pilih prompt untuk gambar ini
+            if len(raw_prompts_i2v) == 0:
+                p = ""
+            elif len(raw_prompts_i2v) == 1:
+                p = raw_prompts_i2v[0]
+            else:
+                p = raw_prompts_i2v[min(idx-1, len(raw_prompts_i2v)-1)]
+
             section = st.container()
             with section:
-                st.markdown(f"#### (I2V) #{idx} Prompt")
-                st.write(p)
-                pbar = st.progress(0, text=f"Prompt #{idx}: menyiapkan…")
+                st.markdown(f"#### (I2V) Gambar #{idx}/{total}")
+                st.image(img_file, width=280)
+                st.write(f"**Prompt dipakai:** {p if p else '(kosong)'}")
+                pbar = st.progress(0, text=f"Gambar #{idx}: menyiapkan…")
+
+            # baca bytes gambar
+            image_bytes = img_file.read()
+            mime = img_file.type or "image/png"
+            image_input = types.Image(image_bytes=image_bytes, mime_type=mime)
 
             try:
                 cfg = types.GenerateVideosConfig(
@@ -224,18 +263,19 @@ with tab2:
             except Exception as e:
                 with section:
                     st.error(f"Gagal mulai generate: {e}")
-                overall_i2v.progress(int(idx / len(prompts_i2v) * 100))
+                overall_i2v.progress(int(idx / total * 100))
                 continue
 
+            # Polling per-gambar → tampil langsung saat selesai
             ticks = 0
             try:
                 while not op.done:
                     time.sleep(6)
                     ticks += 1
                     op = client.operations.get(op)
-                    pbar.progress(min(100, ticks * 7), text=f"Prompt #{idx}: processing…")
+                    pbar.progress(min(100, ticks * 7), text=f"Gambar #{idx}: processing…")
 
-                pbar.progress(100, text=f"Prompt #{idx}: mengunduh…")
+                pbar.progress(100, text=f"Gambar #{idx}: mengunduh…")
 
                 vids = getattr(op.response, "generated_videos", [])
                 if not vids:
@@ -255,16 +295,18 @@ with tab2:
                 with section:
                     st.error(f"Error saat proses/unduh: {e}")
 
-            overall_i2v.progress(int(idx / len(prompts_i2v) * 100))
-            status_i2v.info(f"Selesai #{idx}/{len(prompts_i2v)}")
+            overall_i2v.progress(int(idx / total * 100))
+            status_i2v.info(f"Selesai gambar #{idx}/{total}")
 
 # ===================== TAB 3 — GENERATE IMAGE =====================
 with tab3:
     st.subheader("Generate Image (Imagen 3 — alias “Nano Banana”)")
 
     image_model_label = st.selectbox("Model Gambar", list(IMAGE_MODEL_LABELS.keys()), index=1)
-    img_seed = st.number_input("Seed (opsional)", min_value=0, step=1, value=0, key="img_seed")
-    max_batch_img = st.number_input("Batas batch", min_value=1, max_value=20, value=10, key="img_batch")
+    img_seed = st.number_input("Seed (opsional)", min_value=0, step=1, value=0, key="img_seed",
+                               help="Seed = angka acak untuk reproduksibilitas gambar.")
+    max_batch_img = st.number_input("Batas batch", min_value=1, max_value=50, value=10, key="img_batch",
+                                    help="Maksimum jumlah gambar yang dibuat sekaligus.")
     st.caption("Satu baris prompt = satu gambar.")
 
     prompts_text_img = st.text_area(
