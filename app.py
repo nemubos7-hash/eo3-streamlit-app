@@ -61,6 +61,65 @@ if st.button("🚀 Generate Video"):
     for i, prompt in enumerate(prompts, start=1):
         st.info(f"🎬 Membuat video {i}/{len(prompts)}: `{prompt}`")
 
+        try:
+            video_model = genai.GenerativeModel(model)
+            resp = video_model.generate_video(
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                negative_prompt=negative if negative else None,
+                seed=seed if seed > 0 else None,
+                duration="8s",
+            )
+
+            video_url = resp.result.output[0].uri
+            videos.append((prompt, video_url))
+
+            st.video(video_url)
+            st.download_button("⬇️ Download", video_url, file_name=f"video_{i}.mp4")
+
+        except Exception as e:
+            st.error(f"❌ Gagal buat video {i}: {e}")
+
+        progress.progress(i / len(prompts))
+
+    st.success("✅ Selesai!")
+
+    with st.expander("🔍 Debug info"):
+        st.json({
+            "model": model,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+            "seed": seed,
+            "negative_prompt": negative,
+            "batch_count": len(prompts),
+        })batch_limit = st.sidebar.slider("Maksimal batch sekali jalan", 1, 10, 3)
+
+# Input prompt multi-baris
+st.subheader("📝 Prompt Video")
+prompts_text = st.text_area(
+    "Masukkan prompt (satu per baris untuk batch):",
+    height=150,
+    placeholder="Contoh:\nSeekor kucing oren menari di hutan\nRobot berjalan di kota futuristik",
+)
+
+# Tombol Generate
+if st.button("🚀 Generate Video"):
+    prompts = [p.strip() for p in prompts_text.split("\n") if p.strip()]
+    if not prompts:
+        st.error("⚠️ Isi minimal 1 prompt!")
+        st.stop()
+
+    if len(prompts) > batch_limit:
+        st.warning(f"⚠️ Maksimal {batch_limit} prompt per sekali jalan. Dipotong otomatis.")
+        prompts = prompts[:batch_limit]
+
+    progress = st.progress(0)
+    videos = []
+
+    for i, prompt in enumerate(prompts, start=1):
+        st.info(f"🎬 Membuat video {i}/{len(prompts)}: `{prompt}`")
+
         # Kirim request ke Veo
         try:
             video_model = genai.GenerativeModel(model)
