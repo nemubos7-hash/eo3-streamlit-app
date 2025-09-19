@@ -1,40 +1,102 @@
-import os
-import time
 import streamlit as st
+import google.generativeai as genai
+import time
 
-# Google GenAI SDK (Gemini API + Veo 3)
-from google import genai
-from google.genai import types
+st.set_page_config(page_title="Veo 3 Video Generator", layout="wide")
 
-# ===== UI & INFO =====
-st.set_page_config(page_title="Veo 3 Video Generator (Batch)", layout="centered", page_icon="🎬")
-st.title("🎬 Veo 3 Video Generator — Batch Mode")
+st.title("🎬 Veo 3 Video Generator")
+st.markdown("Generate batch video 8 detik dengan **Google Veo 3** langsung dari browser.")
 
-with st.expander("ℹ️ Info singkat"):
-    st.markdown(
-        """
-- **Veo 3** menghasilkan video **8 detik** dengan audio native.
-- **Aspect ratio**: 16:9 dan 9:16. (Catatan: 1080p terutama untuk 16:9).
-- **Model**: 
-  - `veo-3.0-generate-001` ➜ kualitas tinggi  
-  - `veo-3.0-fast-generate-001` ➜ lebih cepat/hemat
-- *Tip:* Untuk **9:16**, gunakan **720p** agar tidak fallback ke 16:9.
-        """
-    )
+# Input API Key
+api_key = st.sidebar.text_input("Masukkan GEMINI_API_KEY", type="password")
+if not api_key:
+    st.warning("🔑 Masukkan API key di sidebar untuk melanjutkan.")
+    st.stop()
 
-# ==== API KEY ====
-API_KEY = None
-try:
-    # Prioritas: Secrets di Streamlit Cloud
-    API_KEY = st.secrets.get("GEMINI_API_KEY", None) or st.secrets.get("GOOGLE_API_KEY", None)
-except Exception:
-    API_KEY = None
+genai.configure(api_key=api_key)
 
-API_KEY = API_KEY or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+# Sidebar pengaturan
+st.sidebar.header("⚙️ Pengaturan")
 
-with st.sidebar:
-    st.header("Settings")
-    # izinkan user isi API key di WEB jika belum ada
+model = st.sidebar.selectbox(
+    "Pilih model",
+    ["veo-3.0-generate-001", "veo-3.0-fast-generate-001"],
+)
+
+aspect_ratio = st.sidebar.radio("Aspect Ratio", ["16:9", "9:16"])
+resolution = st.sidebar.radio("Resolusi", ["720p", "1080p"])
+
+# Jika pilih portrait 9:16 paksa ke 720p
+if aspect_ratio == "9:16" and resolution == "1080p":
+    st.sidebar.warning("⚠️ 9:16 hanya didukung 720p. Otomatis diset ke 720p.")
+    resolution = "720p"
+
+seed = st.sidebar.number_input("Seed (opsional)", min_value=0, step=1, value=0)
+negative = st.sidebar.text_area("Negative prompt (opsional)")
+
+batch_limit = st.sidebar.slider("Maksimal batch sekali jalan", 1, 10, 3)
+
+# Input prompt multi-baris
+st.subheader("📝 Prompt Video")
+prompts_text = st.text_area(
+    "Masukkan prompt (satu per baris untuk batch):",
+    height=150,
+    placeholder="Contoh:\nSeekor kucing oren menari di hutan\nRobot berjalan di kota futuristik",
+)
+
+# Tombol Generate
+if st.button("🚀 Generate Video"):
+    prompts = [p.strip() for p in prompts_text.split("\n") if p.strip()]
+    if not prompts:
+        st.error("⚠️ Isi minimal 1 prompt!")
+        st.stop()
+
+    if len(prompts) > batch_limit:
+        st.warning(f"⚠️ Maksimal {batch_limit} prompt per sekali jalan. Dipotong otomatis.")
+        prompts = prompts[:batch_limit]
+
+    progress = st.progress(0)
+    videos = []
+
+    for i, prompt in enumerate(prompts, start=1):
+        st.info(f"🎬 Membuat video {i}/{len(prompts)}: `{prompt}`")
+
+        # Kirim request ke Veo
+        try:
+            video_model = genai.GenerativeModel(model)
+            resp = video_model.generate_video(
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                negative_prompt=negative if negative else None,
+                seed=seed if seed > 0 else None,
+                duration="8s",
+            )
+
+            video_url = resp.result.output[0].uri
+            videos.append((prompt, video_url))
+
+            # Tampilkan hasil
+            st.video(video_url)
+            st.download_button("⬇️ Download", video_url, file_name=f"video_{i}.mp4")
+
+        except Exception as e:
+            st.error(f"❌ Gagal buat video {i}: {e}")
+
+        progress.progress(i / len(prompts))
+
+    st.success("✅ Selesai!")
+
+    # Ringkasan debug
+    with st.expander("🔍 Debug info"):
+        st.json({
+            "model": model,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+            "seed": seed,
+            "negative_prompt": negative,
+            "batch_count": len(prompts),
+        })    # izinkan user isi API key di WEB jika belum ada
     api_key_input = st.text_input("API Key (opsional jika pakai Secrets/ENV)", type="password",
                                   help="Kalau kosong, app akan pakai Secrets/ENV.")
     if api_key_input:
